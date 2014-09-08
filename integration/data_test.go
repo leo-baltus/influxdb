@@ -2261,6 +2261,7 @@ func (self *DataTestSuite) MeanAggregateFillWithZero(c *C) (Fun, Fun) {
 				serieses := client.RunQuery(query, c)
 				c.Assert(serieses, HasLen, 1)
 				maps := ToMap(serieses[0])
+				c.Assert(false, Equals, true)
 				c.Assert(maps[0], DeepEquals, map[string]interface{}{"time": 1304378400000.0, "mean": 60.0})
 				v, ok := expectedValue.(float64)
 				// we assign math.Inf for the no fill() case
@@ -2274,4 +2275,38 @@ func (self *DataTestSuite) MeanAggregateFillWithZero(c *C) (Fun, Fun) {
 				c.Assert(maps[3], DeepEquals, map[string]interface{}{"time": 1304378370000.0, "mean": 10.0})
 			}
 		}
+}
+
+//` delete this line ... just trying to unconfuse vim syntax highlighting
+
+func fmtFillQuery(aggregate, table, fill string) string {
+	return fmt.Sprintf("select %s(value) from %s group by time(60s) fill(%s) where time > 60s and time < 300s", aggregate, table, fill)
+}
+
+// Count aggregate filling with null
+func (self *DataTestSuite) CountAggregateFillWithNull(c *C) (Fun, Fun) {
+	return func(client Client) {
+		data := `
+[
+	{
+		"points": [
+		[300000.000000, 30.0],
+		[120000.000000, 20.0],
+		[60000.000000, 10.0]
+		],
+		"name": "test_count_fill_null",
+		"columns": ["time", "value"]
+	}
+]`
+		client.WriteJsonData(data, c, influxdb.Second)
+	}, func(client Client) {
+		series := client.RunQuery(fmtFillQuery("count", "test_count_fill_null", "null"), c)
+		c.Assert(series, HasLen, 5)
+		maps := ToMap(series[0])
+		c.Assert(maps[0], DeepEquals, map[string]interface{}{"time":  300000.0, "count": 1})
+		c.Assert(maps[1], DeepEquals, map[string]interface{}{"time":  240000.0, "count": nil})
+		c.Assert(maps[2], DeepEquals, map[string]interface{}{"time":  180000.0, "count": nil})
+		c.Assert(maps[3], DeepEquals, map[string]interface{}{"time":  120000.0, "count": 1})
+		c.Assert(maps[4], DeepEquals, map[string]interface{}{"time":  60000.0, "count": 1})
+	}
 }
