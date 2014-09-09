@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"time"
+	"strings"
 
 	influxdb "github.com/influxdb/influxdb/client"
 	"github.com/influxdb/influxdb/engine"
@@ -66,31 +67,43 @@ func (self *DataTestSuite) TestAll(c *C) {
 
 	c.Logf("Running %d data tests", len(names))
 
-	for idx := range setup {
-		c.Logf("Initializing database for %s", names[idx])
-		client.CreateDatabase(fmt.Sprintf("db%d", idx), c)
-	}
+	//for idx := range setup {
+	//	c.Logf("Initializing database for %s", names[idx])
+	//	client.CreateDatabase(fmt.Sprintf("db%d", idx), c)
+	//}
 
-	self.server.WaitForServerToSync()
+	//self.server.WaitForServerToSync()
 
-	for idx, s := range setup {
-		client.SetDB(fmt.Sprintf("db%d", idx))
-		c.Logf("Writing data for %s", names[idx])
-		s(client)
-	}
+	//for idx, s := range setup {
+	//	client.SetDB(fmt.Sprintf("db%d", idx))
+	//	c.Logf("Writing data for %s", names[idx])
+	//	s(client)
+	//}
 
-	self.server.WaitForServerToSync()
+	//self.server.WaitForServerToSync()
 
 	// make sure the tests don't use an idle connection, otherwise the
 	// server will close it
 	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
 
 	for idx, t := range test {
+		if strings.Contains(names[idx], "AggregateFillWith") == false {
+			//fmt.Printf("*********** skipping %s\n", names[idx])
+			continue
+		}
+		c.Logf("Initializing database for %s", names[idx])
+		dbname := fmt.Sprintf("db%d", idx)
+		client.CreateDatabase(dbname, c)
 		client.SetDB(fmt.Sprintf("db%d", idx))
+		c.Logf("Writing data for %s", names[idx])
+		s := setup[idx]
+		s(client)
 		c.Logf("Started %s", names[idx])
 		t(client)
+		client.DeleteDatabase(dbname, c)
 		c.Logf("Finished %s", names[idx])
 	}
+	c.Assert("Fix loop above to run all tests !!!", Equals, " ")
 }
 
 type Fun func(client Client)
@@ -2261,7 +2274,6 @@ func (self *DataTestSuite) MeanAggregateFillWithZero(c *C) (Fun, Fun) {
 				serieses := client.RunQuery(query, c)
 				c.Assert(serieses, HasLen, 1)
 				maps := ToMap(serieses[0])
-				c.Assert(false, Equals, true)
 				c.Assert(maps[0], DeepEquals, map[string]interface{}{"time": 1304378400000.0, "mean": 60.0})
 				v, ok := expectedValue.(float64)
 				// we assign math.Inf for the no fill() case
@@ -2277,36 +2289,295 @@ func (self *DataTestSuite) MeanAggregateFillWithZero(c *C) (Fun, Fun) {
 		}
 }
 
-//` delete this line ... just trying to unconfuse vim syntax highlighting
-
-func fmtFillQuery(aggregate, table, fill string) string {
-	return fmt.Sprintf("select %s(value) from %s group by time(60s) fill(%s) where time > 60s and time < 300s", aggregate, table, fill)
+func aggregateWithFillSetup(aggregate, fill string, c *C) Fun {
+	return func(client Client) {
+		seriesName := fmt.Sprintf("test_%s_fill_%s", aggregate, fill)
+		data := fmt.Sprintf("%s%s%s",`
+[
+  {
+    "points": [
+    [300000, 30.0],
+    [120000, 20.0],
+    [60000, 10.0]
+    ],
+    "name": "`, seriesName,`",
+    "columns": ["time", "value"]
+  }
+]`)
+		client.WriteJsonData(data, c, influxdb.Millisecond)
+	}
 }
 
-// Count aggregate filling with null
-func (self *DataTestSuite) CountAggregateFillWithNull(c *C) (Fun, Fun) {
+func aggregateWithFillTest(aggregate string, aggArgs []interface{}, fill string, expVals []interface{}, c *C) Fun {
 	return func(client Client) {
-		data := `
-[
-	{
-		"points": [
-		[300000.000000, 30.0],
-		[120000.000000, 20.0],
-		[60000.000000, 10.0]
-		],
-		"name": "test_count_fill_null",
-		"columns": ["time", "value"]
-	}
-]`
-		client.WriteJsonData(data, c, influxdb.Second)
-	}, func(client Client) {
-		series := client.RunQuery(fmtFillQuery("count", "test_count_fill_null", "null"), c)
-		c.Assert(series, HasLen, 5)
+		seriesName := fmt.Sprintf("test_%s_fill_%s", aggregate, fill)
+		series := client.RunQuery(fmtFillQuery(aggregate, aggArgs, seriesName, fill), c)
+		c.Assert(len(series), Equals, 1)
 		maps := ToMap(series[0])
-		c.Assert(maps[0], DeepEquals, map[string]interface{}{"time":  300000.0, "count": 1})
-		c.Assert(maps[1], DeepEquals, map[string]interface{}{"time":  240000.0, "count": nil})
-		c.Assert(maps[2], DeepEquals, map[string]interface{}{"time":  180000.0, "count": nil})
-		c.Assert(maps[3], DeepEquals, map[string]interface{}{"time":  120000.0, "count": 1})
-		c.Assert(maps[4], DeepEquals, map[string]interface{}{"time":  60000.0, "count": 1})
+		c.Assert(len(maps), Equals, 5)
+		c.Assert(maps[0], DeepEquals, map[string]interface{}{"time":  300000.0, aggregate: expVals[0]})
+		c.Assert(maps[1], DeepEquals, map[string]interface{}{"time":  240000.0, aggregate: expVals[1]})
+		c.Assert(maps[2], DeepEquals, map[string]interface{}{"time":  180000.0, aggregate: expVals[2]})
+		c.Assert(maps[3], DeepEquals, map[string]interface{}{"time":  120000.0, aggregate: expVals[3]})
+		c.Assert(maps[4], DeepEquals, map[string]interface{}{"time":  60000.0, aggregate: expVals[4]})
 	}
+}
+
+var emptyAggArgs []interface{}
+
+// count aggregate filling with null
+func (self *DataTestSuite) CountAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("count", "null", c)
+	testFn := aggregateWithFillTest("count", emptyAggArgs, "null", []interface{}{1.0, nil, nil, 1.0, 1.0}, c)
+
+	return setupFn, testFn
+}
+
+// count aggregate filling with 0
+func (self *DataTestSuite) CountAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("count", "0", c)
+	testFn := aggregateWithFillTest("count", emptyAggArgs, "0", []interface{}{1.0, 0.0, 0.0, 1.0, 1.0}, c)
+
+	return setupFn, testFn
+}
+
+// min aggregate filling with null
+func (self *DataTestSuite) MinAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("min", "null", c)
+	testFn := aggregateWithFillTest("min", emptyAggArgs, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// min aggregate filling with 0
+func (self *DataTestSuite) MinAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("min", "0", c)
+	testFn := aggregateWithFillTest("min", emptyAggArgs, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// max aggregate filling with null
+func (self *DataTestSuite) MaxAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("max", "null", c)
+	testFn := aggregateWithFillTest("max", emptyAggArgs, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// max aggregate filling with 0
+func (self *DataTestSuite) MaxAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("max", "0", c)
+	testFn := aggregateWithFillTest("max", emptyAggArgs, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// mode aggregate filling with null
+func (self *DataTestSuite) ModeAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("mode", "null", c)
+	testFn := aggregateWithFillTest("mode", emptyAggArgs, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// mode aggregate filling with 0
+func (self *DataTestSuite) ModeAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("mode", "0", c)
+	testFn := aggregateWithFillTest("mode", emptyAggArgs, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// median aggregate filling with null
+func (self *DataTestSuite) MedianAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("median", "null", c)
+	testFn := aggregateWithFillTest("median", emptyAggArgs, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// median aggregate filling with 0
+func (self *DataTestSuite) MedianAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("median", "0", c)
+	testFn := aggregateWithFillTest("median", emptyAggArgs, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// distinct aggregate filling with null
+func (self *DataTestSuite) DistinctAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("distinct", "null", c)
+	testFn := aggregateWithFillTest("distinct", emptyAggArgs, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// distinct aggregate filling with 0
+func (self *DataTestSuite) DistinctAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("distinct", "0", c)
+	testFn := aggregateWithFillTest("distinct", emptyAggArgs, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// percentile aggregate filling with null
+func (self *DataTestSuite) PercentileAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("percentile", "null", c)
+	testFn := aggregateWithFillTest("percentile", []interface{}{10}, "null", []interface{}{0.0, nil, nil, 0.0, 0.0}, c)
+
+	return setupFn, testFn
+}
+
+// percentile aggregate filling with 0
+func (self *DataTestSuite) PercentileAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("percentile", "0", c)
+	testFn := aggregateWithFillTest("percentile", []interface{}{10}, "0", []interface{}{0.0, 0.0, 0.0, 0.0, 0.0}, c)
+
+	return setupFn, testFn
+}
+
+// TODO: histogram tests
+
+// TODO: derivative tests
+
+// sum aggregate filling with null
+func (self *DataTestSuite) SumAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("sum", "null", c)
+	testFn := aggregateWithFillTest("sum", emptyAggArgs, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// sum aggregate filling with 0
+func (self *DataTestSuite) SumAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("sum", "0", c)
+	testFn := aggregateWithFillTest("sum", emptyAggArgs, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// stddev aggregate filling with null
+func (self *DataTestSuite) StddevAggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("stddev", "null", c)
+	testFn := aggregateWithFillTest("stddev", emptyAggArgs, "null", []interface{}{0.0, nil, nil, 0.0, 0.0}, c)
+
+	return setupFn, testFn
+}
+
+// stddev aggregate filling with 0
+func (self *DataTestSuite) StddevAggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("stddev", "0", c)
+	testFn := aggregateWithFillTest("stddev", emptyAggArgs, "0", []interface{}{0.0, 0.0, 0.0, 0.0, 0.0}, c)
+
+	return setupFn, testFn
+}
+
+// TODO: fix first
+// first aggregate filling with null
+//func (self *DataTestSuite) FirstAggregateFillWithNull(c *C) (Fun, Fun) {
+//	setupFn := aggregateWithFillSetup("first", "null", c)
+//	testFn := aggregateWithFillTest("first", "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+//
+//	return setupFn, testFn
+//}
+//
+//// first aggregate filling with 0
+//func (self *DataTestSuite) FirstAggregateFillWith0(c *C) (Fun, Fun) {
+//	setupFn := aggregateWithFillSetup("first", "0", c)
+//	testFn := aggregateWithFillTest("first", "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+//
+//	return setupFn, testFn
+//}
+
+// TODO: fix last
+// last aggregate filling with null
+//func (self *DataTestSuite) LastAggregateFillWithNull(c *C) (Fun, Fun) {
+//	setupFn := aggregateWithFillSetup("last", "null", c)
+//	testFn := aggregateWithFillTest("last", "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+//
+//	return setupFn, testFn
+//}
+//
+//// last aggregate filling with 0
+//func (self *DataTestSuite) LastAggregateFillWith0(c *C) (Fun, Fun) {
+//	setupFn := aggregateWithFillSetup("last", "0", c)
+//	testFn := aggregateWithFillTest("last", "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+//
+//	return setupFn, testFn
+//}
+
+// TODO: difference tests
+
+// top 1 aggregate filling with null
+func (self *DataTestSuite) Top1AggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("top", "null", c)
+	testFn := aggregateWithFillTest("top", []interface{}{1}, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// top 1 aggregate filling with 0
+func (self *DataTestSuite) Top1AggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("top", "0", c)
+	testFn := aggregateWithFillTest("top", []interface{}{1}, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// top 10 aggregate filling with null
+func (self *DataTestSuite) Top10AggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("top", "null", c)
+	testFn := aggregateWithFillTest("top", []interface{}{10}, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// top 10 aggregate filling with 0
+func (self *DataTestSuite) Top10AggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("top", "0", c)
+	testFn := aggregateWithFillTest("top", []interface{}{10}, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// bottom 1 aggregate filling with null
+func (self *DataTestSuite) Bottom1AggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("bottom", "null", c)
+	testFn := aggregateWithFillTest("bottom", []interface{}{1}, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// bottom 1 aggregate filling with 0
+func (self *DataTestSuite) Bottom1AggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("bottom", "0", c)
+	testFn := aggregateWithFillTest("bottom", []interface{}{1}, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// bottom 10 aggregate filling with null
+func (self *DataTestSuite) Bottom10AggregateFillWithNull(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("bottom", "null", c)
+	testFn := aggregateWithFillTest("bottom", []interface{}{10}, "null", []interface{}{30.0, nil, nil, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+// bottom 10 aggregate filling with 0
+func (self *DataTestSuite) Bottom10AggregateFillWith0(c *C) (Fun, Fun) {
+	setupFn := aggregateWithFillSetup("bottom", "0", c)
+	testFn := aggregateWithFillTest("bottom", []interface{}{10}, "0", []interface{}{30.0, 0.0, 0.0, 20.0, 10.0}, c)
+
+	return setupFn, testFn
+}
+
+
+func fmtFillQuery(aggregate string, aggArgs []interface{}, series, fill string) string {
+	args := "value"
+	for _, arg := range aggArgs {
+		args = fmt.Sprintf("%s, %v", args, arg)
+	}
+	return fmt.Sprintf("select %s(%s) from %s group by time(60s) fill(%s) where time > 60s and time < 300s", aggregate, args, series, fill)
 }

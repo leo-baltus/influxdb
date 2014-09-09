@@ -412,7 +412,8 @@ func (self *DerivativeAggregator) ColumnNames() []string {
 func (self *DerivativeAggregator) GetValues(state interface{}) [][]*protocol.FieldValue {
 	s, ok := state.(*DerivativeAggregatorState)
 	if !(ok && s.firstValue != nil && s.lastValue != nil) {
-		return [][]*protocol.FieldValue{[]*protocol.FieldValue{self.defaultValue},}
+		return nil
+		//return [][]*protocol.FieldValue{[]*protocol.FieldValue{self.defaultValue},}
 	}
 
 	// if an old value exist, then compute the derivative and insert it in the points slice
